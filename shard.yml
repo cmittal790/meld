@@ -1,0 +1,11 @@
+name: meld
+version: 0.1.0
+authors:
+- "Chetan Mittal <[cmittal79@gmail.com]>"
+description: "Crystal Lang Package Manager"
+crystal: ">= 1.17.1"
+license: AGPL-3.0
+targets:
+  meld:
+    main: src/meld.cr
+dependencies: {}

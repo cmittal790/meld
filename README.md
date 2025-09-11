@@ -298,3 +298,5 @@ This project is licensed under the AGPL-3 License. See LICENSE file for details.
 - [ ] Plugin system
 - [ ] Advanced search filters
 - [ ] Dependency graph visualization
+
+![meld example working screenshot](image.png)

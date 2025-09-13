@@ -15,9 +15,12 @@ Crystal Lang Package Manager — a modern, user-friendly package manager for Cry
 
 ### From Source
 ```bash
+# clone meld repo
 git clone https://github.com/cmittal790/meld.git
 cd meld
-shards install
+# install shards
+crystal run src/meld.cr -- install
+# generate meld executable
 crystal build src/meld.cr -o bin/meld
 ```
 
@@ -27,7 +30,7 @@ crystal build src/meld.cr -o bin/meld
 export PATH=$PATH:/path/to/meld/bin
 # Create a symlink into a directory already in PATH
 # User-level (no sudo), common on Linux:
-mkdir -p ~/.local/bin
+mkdir -p ~/.local/bin # usually you'll have this directory already, but create it in case if you don't
 ln -sf "$PWD/bin/meld" "$HOME/.local/bin/meld"
 
 # Ensure ~/.local/bin is in PATH (persist for bash)
@@ -43,9 +46,11 @@ which meld && meld --version
 ## Usage
 
 ### Project Initialization
-Start a new Crystal project with a properly configured shard.yml.
+Start a new Crystal project.
 
 ```bash
+crystal init app | lib <project_name>
+# optional as `crystal init` has already created shards.yml file. note - `meld init` does not overwrite already existing shards.yml, but you can for sure delete it and run
 meld init
 ```
 

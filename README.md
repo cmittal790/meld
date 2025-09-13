@@ -1,16 +1,15 @@
 UNDER DEVELOPMENT & EXPERIMENTAL - USE AT YOUR OWN RISK
 
 # meld
-Crystal Lang Package Manager - A modern, user-friendly package manager for Crystal projects.
+Crystal Lang Package Manager — a modern, user-friendly package manager for Crystal projects.
 
 ## Features
-
-- **Simple Commands**: Easy-to-remember commands for all package management tasks
-- **GitHub Integration**: Automatic repository detection for popular Crystal shards
-- **Development Dependencies**: Separate handling of development and production dependencies
-- **Search Functionality**: Built-in search for discovering Crystal shards
-- **Project Initialization**: Quick project setup with sensible defaults
-- **Command Execution**: Run commands in your project context
+- Simple commands for common package tasks (init, add, install, update, search, exec, binstubs).
+- GitHub integration with common shard repo inference for quick adds.
+- Development dependencies via --dev kept separate from runtime dependencies.
+- Built-in shard search helper for quick discovery.
+- Project initialization with a sensible shard.yml scaffold.
+- Command execution passthrough within project context.
 
 ## Installation
 
@@ -24,73 +23,94 @@ crystal build src/meld.cr -o bin/meld
 
 ### Add to PATH
 ```bash
-# Add the bin directory to your PATH
+# Add the bin directory to your PATH (temporary for this shell):
 export PATH=$PATH:/path/to/meld/bin
+# Create a symlink into a directory already in PATH
+# User-level (no sudo), common on Linux:
+mkdir -p ~/.local/bin
+ln -sf "$PWD/bin/meld" "$HOME/.local/bin/meld"
+
+# Ensure ~/.local/bin is in PATH (persist for bash)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
+# For zsh users
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+
+# Verify
+which meld && meld --version
 ```
 
 ## Usage
 
 ### Project Initialization
-Start a new Crystal project with a properly configured `shard.yml`:
+Start a new Crystal project with a properly configured shard.yml.
 
 ```bash
 meld init
 ```
 
-This creates a `shard.yml` file with:
-- Project metadata template
-- Crystal version requirement
-- License and author fields
-- Main executable target
+This creates a shard.yml file with:
+- Project metadata template.
+- Crystal version requirement.
+- License and author fields.
+- Main executable target.
 
 ### Adding Dependencies
 
-**Add latest version of a shard:**
+Current syntax (no positional version; flags only):
+- add <shard> [-v <version> | -b <branch> | -t <tag> | -c <commit>] [--dev].
+
+Examples:
+- Add latest (unpinned):
 ```bash
 meld add kemal
 ```
 
-**Add with specific version constraint:**
+- Add with version selector:
 ```bash
-meld add kemal "~> 1.0.0"
+meld add kemal -v "~> 1.0.0"
 ```
 
-**Add as development dependency:**
+- Add as development dependency:
 ```bash
 meld add spec --dev
-meld add ameba "~> 1.4.0" --dev
+meld add ameba -v "~> 1.4.0" --dev
 ```
 
-**Add from specific GitHub repository:**
+- Add from specific GitHub repository:
 ```bash
-meld add my_shard "github:username/repository"
+meld add my_shard -v "github:username/repository"
 ```
 
-**Add from Git URL:**
+- Add from Git URL:
 ```bash
-meld add my_shard "git:https://github.com/username/repo.git"
+meld add my_shard -v "git:https://github.com/username/repo.git"
 ```
+
+Notes:
+- If no selector flag (-v/-b/-t/-c) is given, the dependency is added unpinned poiting to git repo head (no version/branch/tag/commit line).
+- Only meld help <command> shows help; subcommands don’t treat “help” specially.
 
 ### Dependency Management
 
-**Install all dependencies:**
+- Install all dependencies:
 ```bash
 meld install
 ```
 
-**Update all dependencies:**
+- Update all dependencies:
 ```bash
 meld update
 ```
 
-**Update specific dependency:**
+- Update a specific dependency:
 ```bash
 meld update kemal
 ```
 
 ### Searching for Shards
 
-**Search for shards by keyword:**
+- Search by keyword:
 ```bash
 meld search "web framework"
 meld search database
@@ -99,29 +119,29 @@ meld search testing
 
 ### Command Execution
 
-**Run tests:**
+- Run tests:
 ```bash
 meld exec "crystal spec"
 ```
 
-**Build your project:**
+- Build project:
 ```bash
 meld exec "crystal build src/my_project.cr"
 ```
 
-**Run your application:**
+- Run application:
 ```bash
 meld exec "crystal run src/my_project.cr"
 ```
 
-**Run code analysis:**
+- Run code analysis:
 ```bash
 meld exec "ameba"
 ```
 
 ### Binstubs
 
-**Generate executable wrappers:**
+- Generate executable wrappers:
 ```bash
 meld binstubs kemal
 ```
@@ -134,13 +154,13 @@ meld binstubs kemal
 meld init
 
 # Add web framework and dependencies
-meld add kemal "~> 1.0.0"
+meld add kemal
 meld add pg
 meld add jwt
 
 # Add development tools
 meld add spec --dev
-meld add ameba "~> 1.4.0" --dev
+meld add ameba -v "~> 1.6.4" --dev
 meld add webmock --dev
 
 # Install everything
@@ -175,53 +195,31 @@ meld exec "crystal spec spec/models/user_spec.cr"
 
 ## Supported Shards
 
-Meld includes built-in support for popular Crystal shards:
-
-**Web Frameworks:**
-- kemal - Lightning fast web framework
-- lucky - Full-featured web framework
-- amber - Productive web framework
-- marten - Pragmatic web framework
-
-**Database:**
-- pg - PostgreSQL driver
-- mysql - MySQL connector
-- sqlite3 - SQLite3 bindings
-- redis - Redis client
-
-**ORMs:**
-- jennifer - Active Record pattern
-- clear - Advanced PostgreSQL ORM
-- granite - Simple ORM
-
-**Development Tools:**
-- spec - Testing framework
-- ameba - Static code analysis
-- webmock - HTTP mocking
-
-**Utilities:**
-- crest - HTTP client
-- jwt - JWT implementation
-- colorize - Terminal colors
-- hardware - System information
+Built-in hints for popular Crystal shards:
+- Web: kemal, lucky, amber, marten.
+- Database: pg, mysql, sqlite3, redis.
+- ORMs: jennifer, clear, granite.
+- Dev tools: spec, ameba, webmock.
+- Utilities: crest, jwt, colorize, hardware.
 
 ## Commands Reference
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `init` | Initialize new project | `meld init` |
-| `add <shard> [version] [--dev]` | Add dependency | `meld add kemal "~> 1.0.0"` |
-| `search <query>` | Search for shards | `meld search "web framework"` |
-| `install` | Install dependencies | `meld install` |
-| `update [shard]` | Update dependencies | `meld update kemal` |
-| `exec <command>` | Execute command | `meld exec "crystal spec"` |
-| `binstubs <shard>` | Generate binstubs | `meld binstubs kemal` |
-| `help` | Show help | `meld help` |
+| init | Initialize new project | meld init |
+| add <shard> [-v <version> | -b <branch> | -t <tag> | -c <commit>] [--dev] | meld add kemal -v "~> 1.0.0" |
+| search <query> | Search for shards | meld search "web framework" |
+| install | Install dependencies | meld install |
+| update [shard] | Update dependencies | meld update kemal |
+| exec <command> | Execute command | meld exec "crystal spec" |
+| binstubs <shard> | Generate binstubs | meld binstubs kemal |
+| help [command] | Show help | meld help add |
+
 
 ## Development
 
 ### Prerequisites
-- Crystal >= 1.0.0
+- Crystal >= 1.17.1
 - Shards package manager
 
 ### Setup
@@ -289,14 +287,13 @@ This project is licensed under the AGPL-3 License. See LICENSE file for details.
 
 ## Roadmap
 
+- [ ] Meld install script
+- [ ] Global package install e.g. ```meld install -g morten```
 - [ ] Remove packages (prunes from ```lib``` folder too) e.g. ```meld remove kemal```
-- [ ] Meld self installer and updater e.g. ```meld self install```, ```meld self update```
-- [ ] Global package install e.g. ```meld install morten```
-- [ ] Package registry integration
-- [ ] Dependency resolution improvements
-- [ ] Configuration file support
-- [ ] Plugin system
+- [ ] Meld self updater e.g. ```meld self update```
 - [ ] Advanced search filters
-- [ ] Dependency graph visualization
+- [ ] Configuration file support
+- [ ] Package registry and integration
+- [ ] Dependency resolution improvements
 
 ![meld example working screenshot](image.png)

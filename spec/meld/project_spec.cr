@@ -1,3 +1,5 @@
+# spec/meld/project_spec.cr
+
 require "../spec_helper"
 require "file_utils"
 
@@ -30,6 +32,39 @@ def write_minimal_shard_yml
   YAML
 end
 
+# Helper: build selector
+def selector(type : Meld::Project::SelectorType, value : String = "") : Meld::Project::AddSelector
+  s = Meld::Project::AddSelector.new
+  s.type = type
+  s.value = value
+  s
+end
+
+# Helper: extract a dependency block by name (best-effort YAML-ish parsing)
+def extract_dep_block(yaml_text : String, dep_name : String) : String
+  lines = yaml_text.lines
+  # locate the 'dep_name:' line with any leading spaces
+  idx = lines.index { |ln| ln.lstrip.starts_with?("#{dep_name}:") }
+  raise "dependency '#{dep_name}' not found" unless idx
+  block = [] of String
+  block << lines[idx]
+  j = idx + 1
+  # Capture following indented lines (at least two spaces) until a non-indented or blank line of lesser indent breaks
+  while j < lines.size
+    ln = lines[j]
+    # stop if next top-level key or lesser indent (starts with no spaces)
+    break if ln.match(/^([^\s]|$)/)
+    # keep indented lines (2+ spaces)
+    if ln.match(/^\s{2,}\S/)
+      block << ln
+      j += 1
+    else
+      break
+    end
+  end
+  block.join
+end
+
 describe Meld::Project do
   describe ".init" do
     it "creates shard.yml when absent" do
@@ -57,28 +92,34 @@ describe Meld::Project do
     it "returns when shard.yml missing" do
       with_tmpdir do
         File.exists?("shard.yml").should be_false
-        Meld::Project.add("kemal", "~> 1.5.0", false)
+        Meld::Project.add("kemal", selector(Meld::Project::SelectorType::Version, "~> 1.5.0"), false)
         File.exists?("shard.yml").should be_false
       end
     end
 
-    it "adds dependency with explicit version" do
+    it "adds dependency with version selector" do
       with_tmpdir do
         write_minimal_shard_yml
-        Meld::Project.add("kemal", "~> 1.5.0", false)
+        Meld::Project.add("kemal", selector(Meld::Project::SelectorType::Version, "~> 1.5.0"), false)
         c = File.read("shard.yml")
         c.should contain("dependencies:")
         c.should contain("kemal:")
         c.should contain("github: kemalcr/kemal")
-        c.should contain(%(version: "~> 1.5.0"))
+        kemal_block = extract_dep_block(c, "kemal")
+        kemal_block.should contain(%(version: "~> 1.5.0"))
       end
     end
 
-    it "adds dependency with default version when omitted" do
+    it "adds dependency unpinned when selector is empty version" do
       with_tmpdir do
         write_minimal_shard_yml
-        Meld::Project.add("kemal", nil, false)
-        File.read("shard.yml").should contain(%(version: "~> 0.1.0"))
+        Meld::Project.add("kemal", selector(Meld::Project::SelectorType::Version, ""), false)
+        c = File.read("shard.yml")
+        c.should contain("dependencies:")
+        c.should contain("kemal:")
+        c.should contain("github: kemalcr/kemal")
+        kemal_block = extract_dep_block(c, "kemal")
+        kemal_block.includes?("version:").should be_false
       end
     end
 
@@ -98,12 +139,13 @@ describe Meld::Project do
         dependencies: {}
         YAML
 
-        Meld::Project.add("spec", "~> 1.0.0", true)
+        Meld::Project.add("spec", selector(Meld::Project::SelectorType::Version, "~> 1.0.0"), true)
         c = File.read("shard.yml")
         c.should contain("development_dependencies:")
         c.should contain("spec:")
         c.should contain("github: crystal-lang/spec")
-        c.should contain(%(version: "~> 1.0.0"))
+        spec_block = extract_dep_block(c, "spec")
+        spec_block.should contain(%(version: "~> 1.0.0"))
       end
     end
 
@@ -126,24 +168,58 @@ describe Meld::Project do
             version: "~> 0.2.0"
         YAML
 
-        Meld::Project.add("kemal", "~> 1.5.0", false)
+        Meld::Project.add("kemal", selector(Meld::Project::SelectorType::Version, "~> 1.5.0"), false)
         c = File.read("shard.yml")
         c.should contain("colorize:")
         c.should contain("kemal:")
       end
     end
 
-    it "supports github: and git: specifiers" do
+    it "supports github: specifier via version value" do
       with_tmpdir do
         write_minimal_shard_yml
-        # github:
-        Meld::Project.add("foo", "github:bar/baz", false)
+        Meld::Project.add("foo", selector(Meld::Project::SelectorType::Version, "github:bar/baz"), false)
         File.read("shard.yml").should contain("github: bar/baz")
-        # git:
-        Meld::Project.add("libgit", "git:https://example.com/libgit.git", false)
+      end
+    end
+
+    it "supports git: specifier via version value" do
+      with_tmpdir do
+        write_minimal_shard_yml
+        Meld::Project.add("libgit", selector(Meld::Project::SelectorType::Version, "git:https://example.com/libgit.git"), false)
         c = File.read("shard.yml")
         c.should contain("libgit:")
         c.should contain("git: https://example.com/libgit.git")
+      end
+    end
+
+    it "writes tag selector" do
+      with_tmpdir do
+        write_minimal_shard_yml
+        Meld::Project.add("kemal", selector(Meld::Project::SelectorType::Tag, "v1.3.0"), false)
+        c = File.read("shard.yml")
+        kemal_block = extract_dep_block(c, "kemal")
+        kemal_block.should contain("tag: v1.3.0")
+      end
+    end
+
+    it "writes branch selector" do
+      with_tmpdir do
+        write_minimal_shard_yml
+        Meld::Project.add("kemal", selector(Meld::Project::SelectorType::Branch, "main"), false)
+        c = File.read("shard.yml")
+        kemal_block = extract_dep_block(c, "kemal")
+        kemal_block.should contain("branch: main")
+      end
+    end
+
+    it "writes commit selector" do
+      with_tmpdir do
+        write_minimal_shard_yml
+        Meld::Project.add("kemal", selector(Meld::Project::SelectorType::Commit, "deadbeef"), false)
+        c = File.read("shard.yml")
+        kemal_block = extract_dep_block(c, "kemal")
+        kemal_block.should contain("commit: deadbeef")
       end
     end
   end

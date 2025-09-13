@@ -1,12 +1,14 @@
+# spec/meld/cli_spec.cr
+
 require "../spec_helper"
 
 describe Meld::CLI do
-  it "supports --version without errors" do
+  it "supports --version without errors (global before command)" do
     Meld::CLI.run(["--version"])
     true.should be_true
   end
 
-  it "supports --help without errors" do
+  it "supports --help without errors (global before command)" do
     Meld::CLI.run(["--help"])
     true.should be_true
   end
@@ -18,7 +20,6 @@ describe Meld::CLI do
 
   describe "init" do
     it "parses init command" do
-      # Only verifies parsing path; integration test will assert file effects
       Meld::CLI.run(["init"])
       true.should be_true
     end
@@ -30,18 +31,38 @@ describe Meld::CLI do
       true.should be_true
     end
 
-    it "accepts <shard> positional" do
+    it "accepts <shard> then -v VALUE (version selector)" do
+      Meld::CLI.run(["add", "kemal", "-v", "1.6.4"])
+      true.should be_true
+    end
+
+    it "accepts <shard> then -b NAME (branch selector)" do
+      Meld::CLI.run(["add", "kemal", "-b", "main"])
+      true.should be_true
+    end
+
+    it "accepts <shard> then -t NAME (tag selector)" do
+      Meld::CLI.run(["add", "kemal", "-t", "v1.3.0"])
+      true.should be_true
+    end
+
+    it "accepts <shard> then -c SHA (commit selector)" do
+      Meld::CLI.run(["add", "kemal", "-c", "deadbeef"])
+      true.should be_true
+    end
+
+    it "accepts --dev after a selector" do
+      Meld::CLI.run(["add", "kemal", "-t", "v1.3.0", "--dev"])
+      true.should be_true
+    end
+
+    it "treats any token as shard name (no special-casing 'help')" do
+      Meld::CLI.run(["add", "help", "-t", "v1.0.0"])
+      true.should be_true
+    end
+
+    it "accepts <shard> with no selector flags (unpinned add)" do
       Meld::CLI.run(["add", "kemal"])
-      true.should be_true
-    end
-
-    it "accepts <shard> and [version]" do
-      Meld::CLI.run(["add", "kemal", "~> 1.5.0"])
-      true.should be_true
-    end
-
-    it "accepts --dev switch" do
-      Meld::CLI.run(["add", "--dev", "spec"])
       true.should be_true
     end
   end
@@ -104,5 +125,17 @@ describe Meld::CLI do
   it "prints help on unknown command (no crash)" do
     Meld::CLI.run(["wat"])
     true.should be_true
+  end
+
+  describe "help subcommand" do
+    it "supports 'meld help add'" do
+      Meld::CLI.run(["help", "add"])
+      true.should be_true
+    end
+
+    it "supports 'meld help' (global help)" do
+      Meld::CLI.run(["help"])
+      true.should be_true
+    end
   end
 end

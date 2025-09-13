@@ -1,5 +1,3 @@
-# src/meld/cli.cr
-
 require "option_parser"
 
 module Meld
@@ -7,13 +5,31 @@ module Meld
     VERSION = "0.1.0"
 
     def self.run(argv : Array(String))
-      # Global flags
+      # Phase 0: split argv into global flags, subcommand, and subcommand args
+      global_argv = [] of String
+      subcommand : String? = nil
+      sub_args = [] of String
+
+      i = 0
+      while i < argv.size
+        tok = argv[i]
+        if tok.starts_with?("-")
+          global_argv << tok
+          i += 1
+        else
+          subcommand = tok
+          i += 1
+          break
+        end
+      end
+      while i < argv.size
+        sub_args << argv[i]
+        i += 1
+      end
+
+      # Global flags (apply only before subcommand)
       show_version = false
       show_help = false
-
-      # Subcommand dispatch
-      command : String? = nil
-      cmd_args = [] of String
 
       global = OptionParser.new do |parser|
         parser.banner = <<-BANNER
@@ -23,14 +39,14 @@ module Meld
           meld [options] <command> [command options]
 
         Commands:
-          init                       Initialize project (shard.yml)
-          add <shard> [ver] [--dev]  Add a shard to project
-          search <query>             Search for available shards
-          install                    Install dependencies
-          update [shard]             Update all or a specific shard
-          exec <cmd>                 Run a command in project context
-          binstubs <shard>           Generate executable wrappers
-          help [command]             Show help (global or for a command)
+          init                               Initialize project (shard.yml)
+          add <shard> [-v|-b|-t|-c] [--dev]  Add a shard (pin with version/branch/tag/commit)
+          search <query>                     Search for available shards
+          install                            Install dependencies
+          update [shard]                     Update all or a specific shard
+          exec <cmd>                         Run a command in project context
+          binstubs <shard>                   Generate executable wrappers
+          help [command]                     Show help (global or for a command)
 
         Options:
         BANNER
@@ -38,17 +54,13 @@ module Meld
         parser.on("-v", "--version", "Show version") { show_version = true }
         parser.on("-h", "--help", "Show help") { show_help = true }
 
-        # Capture first non-flag as subcommand; remaining as that subcommand's args
-        parser.unknown_args do |unknown|
-          if unknown.size > 0
-            command = unknown.shift?
-            cmd_args = unknown
-          end
+        parser.unknown_args do |_|
+          # ignore unknowns here; argv already split
         end
       end
 
       begin
-        global.parse(argv)
+        global.parse(global_argv)
       rescue ex
         STDERR.puts "Error: #{ex.message}"
         STDERR.puts
@@ -56,19 +68,9 @@ module Meld
         return
       end
 
-      if show_version
-        puts "meld #{VERSION}"
-        return
-      end
-
-      if show_help && command.nil?
-        puts global
-        return
-      end
-
-      # Support: meld help [command]
-      if command == "help"
-        sub = cmd_args.shift?
+      # Only supported help form: meld help <command>
+      if subcommand == "help"
+        sub = sub_args.shift?
         if sub
           self.print_command_help(sub)
         else
@@ -77,12 +79,22 @@ module Meld
         return
       end
 
-      if command.nil?
+      if show_version && subcommand.nil?
+        puts "meld #{VERSION}"
+        return
+      end
+
+      if show_help && subcommand.nil?
         puts global
         return
       end
 
-      case command
+      if subcommand.nil?
+        puts global
+        return
+      end
+
+      case subcommand
       when "init"
         Meld::Project.init
 
@@ -90,32 +102,42 @@ module Meld
         add_parser = OptionParser.new do |parser|
           parser.banner = <<-B
           Usage:
-            meld add <shard> [version] [--dev]
-
-          Options:
-            --dev    Add as development dependency
+            meld add <shard> [-v <version> | -b <branch> | -t <tag> | -c <commit>] [--dev]
           B
         end
 
         add_dev = false
+        opt_version : String? = nil
+        opt_branch  : String? = nil
+        opt_tag     : String? = nil
+        opt_commit  : String? = nil
+
         add_parser.on("--dev", "Add as development dependency") { add_dev = true }
+        add_parser.on("-v VALUE", "--ver VALUE", "Version constraint (e.g. \"~> 1.2.3\" or \"1.6.4\")") { |val| opt_version = val }
+        add_parser.on("-b NAME", "--branch NAME", "Git branch to pin") { |val| opt_branch = val }
+        add_parser.on("-t NAME", "--tag NAME", "Git tag to pin") { |val| opt_tag = val }
+        add_parser.on("-c SHA", "--commit SHA", "Git commit to pin") { |val| opt_commit = val }
 
         add_shard : String? = nil
-        add_version : String? = nil
+        seen_positional = false
 
         begin
           add_parser.unknown_args do |rest|
             rest.each do |tok|
               if tok.starts_with?("-")
                 # flags handled by OptionParser
-              elsif add_shard.nil?
-                add_shard = tok
-              elsif add_version.nil?
-                add_version = tok
+              else
+                unless seen_positional
+                  add_shard = tok
+                  seen_positional = true
+                else
+                  # ignore extra positionals
+                end
               end
             end
           end
-          add_parser.parse(cmd_args)
+
+          add_parser.parse(sub_args)
         rescue ex
           STDERR.puts "Error: #{ex.message}"
           STDERR.puts
@@ -123,18 +145,40 @@ module Meld
           return
         end
 
-        # Require shard
         if add_shard.to_s.strip.empty?
           STDERR.puts "Error: shard name required"
+          STDERR.puts
           STDERR.puts add_parser
           return
         end
 
-        # Default version if missing/blank (coerce before calling String methods)
-        v = add_version.to_s
-        v = "~> 0.1.0" if v.strip.empty?
+        # Build selector from flags; if none, leave unpinned
+        selector = Meld::Project::AddSelector.new
 
-        Meld::Project.add(add_shard.not_nil!, v, add_dev)
+        v_commit  = opt_commit.to_s
+        v_tag     = opt_tag.to_s
+        v_branch  = opt_branch.to_s
+        v_verflag = opt_version.to_s
+
+        if !v_commit.empty?
+          selector.type = Meld::Project::SelectorType::Commit
+          selector.value = v_commit
+        elsif !v_tag.empty?
+          selector.type = Meld::Project::SelectorType::Tag
+          selector.value = v_tag
+        elsif !v_branch.empty?
+          selector.type = Meld::Project::SelectorType::Branch
+          selector.value = v_branch
+        elsif !v_verflag.empty?
+          selector.type = Meld::Project::SelectorType::Version
+          selector.value = v_verflag
+        else
+          # No selector flags: add unpinned dependency (no version/branch/tag/commit line)
+          selector.type = Meld::Project::SelectorType::Version
+          selector.value = ""
+        end
+
+        Meld::Project.add(add_shard.not_nil!, selector, add_dev)
 
       when "search"
         search_parser = OptionParser.new do |parser|
@@ -153,7 +197,7 @@ module Meld
             q = rest.join(" ")
             search_query = q unless q.strip.empty?
           end
-          search_parser.parse(cmd_args)
+          search_parser.parse(sub_args)
         rescue ex
           STDERR.puts "Error: #{ex.message}"
           STDERR.puts
@@ -188,7 +232,7 @@ module Meld
           update_parser.unknown_args do |rest|
             update_shard = rest.shift?
           end
-          update_parser.parse(cmd_args)
+          update_parser.parse(sub_args)
         rescue ex
           STDERR.puts "Error: #{ex.message}"
           STDERR.puts
@@ -215,7 +259,7 @@ module Meld
             joined = rest.join(" ")
             exec_cmd = joined unless joined.strip.empty?
           end
-          exec_parser.parse(cmd_args)
+          exec_parser.parse(sub_args)
         rescue ex
           STDERR.puts "Error: #{ex.message}"
           STDERR.puts
@@ -247,7 +291,7 @@ module Meld
           bin_parser.unknown_args do |rest|
             bin_shard = rest.shift?
           end
-          bin_parser.parse(cmd_args)
+          bin_parser.parse(sub_args)
         rescue ex
           STDERR.puts "Error: #{ex.message}"
           STDERR.puts
@@ -264,7 +308,7 @@ module Meld
         Meld::Project.binstubs(bin_shard.not_nil!)
 
       else
-        STDERR.puts "Unknown command: #{command}"
+        STDERR.puts "Unknown command: #{subcommand}"
         puts
         puts global
       end
@@ -275,7 +319,7 @@ module Meld
       when "init"
         puts "Usage: meld init\n\nInitialize project (shard.yml)."
       when "add"
-        puts "Usage: meld add <shard> [version] [--dev]\n\nAdd a shard to project. Use --dev for development dependency."
+        puts "Usage: meld add <shard> [-v <version> | -b <branch> | -t <tag> | -c <commit>] [--dev]\n\nAdd a shard to project. Use --dev for development dependency."
       when "search"
         puts "Usage: meld search <query>\n\nSearch for available shards."
       when "install"

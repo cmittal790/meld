@@ -1,11 +1,30 @@
-# src/meld/project.cr
-
 require "yaml"
 require "http/client"
 require "json"
 
 module Meld
   class Project
+    enum SelectorType
+      Version
+      Branch
+      Tag
+      Commit
+    end
+
+    struct AddSelector
+      property type : SelectorType = SelectorType::Version
+      property value : String = ""
+
+      def version? : Bool; @type == SelectorType::Version; end
+      def branch?  : Bool; @type == SelectorType::Branch;  end
+      def tag?     : Bool; @type == SelectorType::Tag;     end
+      def commit?  : Bool; @type == SelectorType::Commit;  end
+
+      def empty? : Bool
+        @value.empty?
+      end
+    end
+
     PROJECT_FILE = "shard.yml"
 
     def self.init
@@ -16,7 +35,7 @@ module Meld
           name: my_project
           version: 0.1.0
           authors:
-          - "Your Name <[email protected]>"
+          - "Your Name <[email protected]>"
           description: "A brief description of your shard and its purpose"
           crystal: ">= 1.0.0"
           license: MIT
@@ -31,88 +50,103 @@ module Meld
       end
     end
 
-    def self.add(shard_name, version = nil, dev_dependency = false)
+    # Accept selector for version/branch/tag/commit
+    # When Version with empty value, add only the source (github/git) without any pin.
+    def self.add(shard_name : String, selector : AddSelector, dev_dependency : Bool = false)
       unless File.exists?(PROJECT_FILE)
         puts "No shard.yml found! Run 'meld init' first."
         return
       end
 
-      version = "~> 0.1.0" if version.nil?
       shard_info = get_github_shard_info(shard_name)
       dep_section = dev_dependency ? "development_dependencies" : "dependencies"
 
-      # Get repository info
+      github_repo : String? = nil
+      git_url : String? = nil
+
+      # Resolve repository
       if shard_info && shard_info.has_key?("github_repo")
         repo_value = shard_info["github_repo"]
         github_repo = repo_value.is_a?(JSON::Any) ? repo_value.as_s : repo_value.to_s
-      elsif version.starts_with?("github:")
-        github_repo = version.lchop("github:")
-        version = nil
-      elsif version.starts_with?("git:")
-        git_url = version.lchop("git:")
-        github_repo = nil
       else
-        github_repo = get_common_shard_repo(shard_name)
+        if selector.version?
+          if selector.value.starts_with?("github:")
+            github_repo = selector.value.lchop("github:")
+          elsif selector.value.starts_with?("git:")
+            git_url = selector.value.lchop("git:")
+            github_repo = nil
+          else
+            github_repo = get_common_shard_repo(shard_name)
+          end
+        else
+          github_repo = get_common_shard_repo(shard_name)
+        end
       end
 
-      # Read, modify, and write the file
       content = File.read(PROJECT_FILE)
 
-      # Simple string replacement approach
-      if content.includes?("#{dep_section}: {}")
-        # Replace empty section with populated one
-        if git_url
-          replacement = "#{dep_section}:\n  #{shard_name}:\n    git: #{git_url}"
-        elsif version
-          replacement = "#{dep_section}:\n  #{shard_name}:\n    github: #{github_repo}\n    version: \"#{version}\""
-        else
-          replacement = "#{dep_section}:\n  #{shard_name}:\n    github: #{github_repo}"
+      dep_lines = [] of String
+      dep_lines << "  #{shard_name}:"
+      if git_url
+        dep_lines << "    git: #{git_url}"
+        if selector.branch? && !selector.empty?
+          dep_lines << "    branch: #{selector.value}"
+        elsif selector.tag? && !selector.empty?
+          dep_lines << "    tag: #{selector.value}"
+        elsif selector.commit? && !selector.empty?
+          dep_lines << "    commit: #{selector.value}"
         end
+      else
+        dep_lines << "    github: #{github_repo}"
+        if selector.version? && !selector.empty?
+          dep_lines << "    version: \"#{selector.value}\""
+        elsif selector.branch?
+          dep_lines << "    branch: #{selector.value}"
+        elsif selector.tag?
+          dep_lines << "    tag: #{selector.value}"
+        elsif selector.commit?
+          dep_lines << "    commit: #{selector.value}"
+        end
+      end
 
+      block_text = dep_lines.join("\n") + "\n"
+
+      if content.includes?("#{dep_section}: {}")
+        replacement = "#{dep_section}:\n#{block_text}"
         content = content.gsub("#{dep_section}: {}", replacement)
       elsif content.includes?("#{dep_section}:")
-        # Add to existing section - find the section and add after it
         lines = content.lines(chomp: false)
         new_lines = [] of String
-        in_section = false
         added = false
 
         lines.each do |line|
           new_lines << line
-
           if line.strip == "#{dep_section}:" && !added
-            in_section = true
-            if git_url
-              new_lines << "  #{shard_name}:\n"
-              new_lines << "    git: #{git_url}\n"
-            elsif version
-              new_lines << "  #{shard_name}:\n"
-              new_lines << "    github: #{github_repo}\n"
-              new_lines << "    version: \"#{version}\"\n"
-            else
-              new_lines << "  #{shard_name}:\n"
-              new_lines << "    github: #{github_repo}\n"
-            end
+            new_lines << block_text
             added = true
           end
         end
 
         content = new_lines.join
       else
-        # Add new section at end
-        if git_url
-          content += "\n#{dep_section}:\n  #{shard_name}:\n    git: #{git_url}\n"
-        elsif version
-          content += "\n#{dep_section}:\n  #{shard_name}:\n    github: #{github_repo}\n    version: \"#{version}\"\n"
-        else
-          content += "\n#{dep_section}:\n  #{shard_name}:\n    github: #{github_repo}\n"
-        end
+        content += "\n#{dep_section}:\n#{block_text}"
       end
 
       File.write(PROJECT_FILE, content)
 
       dep_type = dev_dependency ? "development dependency" : "dependency"
-      puts "Added #{shard_name} (#{version || "latest"}) as #{dep_type} to shard.yml"
+      human_selector =
+        if selector.version?
+          selector.empty? ? "unlocked" : selector.value
+        elsif selector.branch?
+          "branch #{selector.value}"
+        elsif selector.tag?
+          "tag #{selector.value}"
+        else
+          "commit #{selector.value}"
+        end
+
+      puts "Added #{shard_name} (#{human_selector}) as #{dep_type} to shard.yml"
 
       if shard_info && shard_info.has_key?("description")
         desc_value = shard_info["description"]
@@ -199,6 +233,7 @@ module Meld
 
     def self.binstubs(shard_name)
       puts "Generating binstubs for: #{shard_name}"
+      puts "Note: This feature is not implemented yet."
     end
 
     def self.set_metadata(name : String? = nil, version : String? = nil, author : String? = nil, description : String? = nil, crystal_version : String? = nil, license : String? = nil)

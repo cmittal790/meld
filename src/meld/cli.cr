@@ -1,3 +1,9 @@
+# src/meld/cli.cr
+#
+# Complete updated file with STRICT normalization of all possibly-nil strings
+# BEFORE any use. No .empty? calls occur on String | Nil unions. Every variable
+# used in checks is a plain String.
+
 require "option_parser"
 
 module Meld
@@ -46,6 +52,7 @@ module Meld
           update [shard]                     Update all or a specific shard
           exec <cmd>                         Run a command in project context
           binstubs <shard>                   Generate executable wrappers
+          global install <shard> [...]       Build and install shard executables globally
           help [command]                     Show help (global or for a command)
 
         Options:
@@ -54,9 +61,7 @@ module Meld
         parser.on("-v", "--version", "Show version") { show_version = true }
         parser.on("-h", "--help", "Show help") { show_help = true }
 
-        parser.unknown_args do |_|
-          # ignore unknowns here; argv already split
-        end
+        parser.unknown_args { |_| }
       end
 
       begin
@@ -97,7 +102,6 @@ module Meld
       case subcommand
       when "init"
         Meld::Project.init
-
       when "add"
         add_parser = OptionParser.new do |parser|
           parser.banner = <<-B
@@ -107,18 +111,18 @@ module Meld
         end
 
         add_dev = false
-        opt_version : String? = nil
-        opt_branch  : String? = nil
-        opt_tag     : String? = nil
-        opt_commit  : String? = nil
+        opt_version_raw : String? = nil
+        opt_branch_raw : String? = nil
+        opt_tag_raw : String? = nil
+        opt_commit_raw : String? = nil
 
         add_parser.on("--dev", "Add as development dependency") { add_dev = true }
-        add_parser.on("-v VALUE", "--ver VALUE", "Version constraint (e.g. \"~> 1.2.3\" or \"1.6.4\")") { |val| opt_version = val }
-        add_parser.on("-b NAME", "--branch NAME", "Git branch to pin") { |val| opt_branch = val }
-        add_parser.on("-t NAME", "--tag NAME", "Git tag to pin") { |val| opt_tag = val }
-        add_parser.on("-c SHA", "--commit SHA", "Git commit to pin") { |val| opt_commit = val }
+        add_parser.on("-v VALUE", "--ver VALUE", "Version constraint (e.g. \"~> 1.2.3\" or \"1.6.4\")") { |val| opt_version_raw = val }
+        add_parser.on("-b NAME", "--branch NAME", "Git branch to pin") { |val| opt_branch_raw = val }
+        add_parser.on("-t NAME", "--tag NAME", "Git tag to pin") { |val| opt_tag_raw = val }
+        add_parser.on("-c SHA", "--commit SHA", "Git commit to pin") { |val| opt_commit_raw = val }
 
-        add_shard : String? = nil
+        add_shard_raw : String? = nil
         seen_positional = false
 
         begin
@@ -128,10 +132,8 @@ module Meld
                 # flags handled by OptionParser
               else
                 unless seen_positional
-                  add_shard = tok
+                  add_shard_raw = tok
                   seen_positional = true
-                else
-                  # ignore extra positionals
                 end
               end
             end
@@ -145,21 +147,21 @@ module Meld
           return
         end
 
-        if add_shard.to_s.strip.empty?
+        # Normalize all possibly-nil strings BEFORE any checks
+        add_shard = (add_shard_raw || "").to_s
+        v_commit = (opt_commit_raw || "").to_s
+        v_tag = (opt_tag_raw || "").to_s
+        v_branch = (opt_branch_raw || "").to_s
+        v_version = (opt_version_raw || "").to_s
+
+        if add_shard.strip.empty?
           STDERR.puts "Error: shard name required"
           STDERR.puts
           STDERR.puts add_parser
           return
         end
 
-        # Build selector from flags; if none, leave unpinned
         selector = Meld::Project::AddSelector.new
-
-        v_commit  = opt_commit.to_s
-        v_tag     = opt_tag.to_s
-        v_branch  = opt_branch.to_s
-        v_verflag = opt_version.to_s
-
         if !v_commit.empty?
           selector.type = Meld::Project::SelectorType::Commit
           selector.value = v_commit
@@ -169,33 +171,25 @@ module Meld
         elsif !v_branch.empty?
           selector.type = Meld::Project::SelectorType::Branch
           selector.value = v_branch
-        elsif !v_verflag.empty?
+        elsif !v_version.empty?
           selector.type = Meld::Project::SelectorType::Version
-          selector.value = v_verflag
+          selector.value = v_version
         else
-          # No selector flags: add unpinned dependency (no version/branch/tag/commit line)
           selector.type = Meld::Project::SelectorType::Version
           selector.value = ""
         end
 
-        Meld::Project.add(add_shard.not_nil!, selector, add_dev)
-
+        Meld::Project.add(add_shard, selector, add_dev)
       when "search"
         search_parser = OptionParser.new do |parser|
-          parser.banner = <<-B
-          Usage:
-            meld search <query>
-
-          Notes:
-            Query is required (positional). Example: meld search "web framework"
-          B
+          parser.banner = "Usage:\n  meld search <query>\n"
         end
 
-        search_query : String? = nil
+        search_query_raw : String? = nil
         begin
           search_parser.unknown_args do |rest|
             q = rest.join(" ")
-            search_query = q unless q.strip.empty?
+            search_query_raw = q unless q.strip.empty?
           end
           search_parser.parse(sub_args)
         rescue ex
@@ -205,33 +199,24 @@ module Meld
           return
         end
 
-        if search_query.to_s.strip.empty?
+        search_query = (search_query_raw || "").to_s
+        if search_query.strip.empty?
           STDERR.puts "Error: search query required"
           STDERR.puts search_parser
           return
         end
 
-        Meld::Project.search(search_query.not_nil!)
-
+        Meld::Project.search(search_query)
       when "install"
         Meld::Project.install
-
       when "update"
         update_parser = OptionParser.new do |parser|
-          parser.banner = <<-B
-          Usage:
-            meld update [shard]
-
-          Notes:
-            If shard is provided, updates only that shard; otherwise updates all.
-          B
+          parser.banner = "Usage:\n  meld update [shard]\n"
         end
 
-        update_shard : String? = nil
+        update_shard_raw : String? = nil
         begin
-          update_parser.unknown_args do |rest|
-            update_shard = rest.shift?
-          end
+          update_parser.unknown_args { |rest| update_shard_raw = rest.shift? }
           update_parser.parse(sub_args)
         rescue ex
           STDERR.puts "Error: #{ex.message}"
@@ -240,24 +225,19 @@ module Meld
           return
         end
 
+        update_shard = (update_shard_raw || "").to_s
+        update_shard = nil if update_shard.strip.empty?
         Meld::Project.update(update_shard)
-
       when "exec"
         exec_parser = OptionParser.new do |parser|
-          parser.banner = <<-B
-          Usage:
-            meld exec <command>
-
-          Notes:
-            Executes the given shell command in project context.
-          B
+          parser.banner = "Usage:\n  meld exec <command>\n"
         end
 
-        exec_cmd : String? = nil
+        exec_cmd_raw : String? = nil
         begin
           exec_parser.unknown_args do |rest|
             joined = rest.join(" ")
-            exec_cmd = joined unless joined.strip.empty?
+            exec_cmd_raw = joined unless joined.strip.empty?
           end
           exec_parser.parse(sub_args)
         rescue ex
@@ -267,30 +247,22 @@ module Meld
           return
         end
 
-        if exec_cmd.to_s.strip.empty?
+        exec_cmd = (exec_cmd_raw || "").to_s
+        if exec_cmd.strip.empty?
           STDERR.puts "Error: command required"
           STDERR.puts exec_parser
           return
         end
 
-        Meld::Project.exec(exec_cmd.not_nil!)
-
+        Meld::Project.exec(exec_cmd)
       when "binstubs"
         bin_parser = OptionParser.new do |parser|
-          parser.banner = <<-B
-          Usage:
-            meld binstubs <shard>
-
-          Notes:
-            Generates executable wrappers for a shard.
-          B
+          parser.banner = "Usage:\n  meld binstubs <shard>\n"
         end
 
-        bin_shard : String? = nil
+        bin_shard_raw : String? = nil
         begin
-          bin_parser.unknown_args do |rest|
-            bin_shard = rest.shift?
-          end
+          bin_parser.unknown_args { |rest| bin_shard_raw = rest.shift? }
           bin_parser.parse(sub_args)
         rescue ex
           STDERR.puts "Error: #{ex.message}"
@@ -299,14 +271,109 @@ module Meld
           return
         end
 
-        if bin_shard.to_s.strip.empty?
+        bin_shard = (bin_shard_raw || "").to_s
+        if bin_shard.strip.empty?
           STDERR.puts "Error: shard name required"
           STDERR.puts bin_parser
           return
         end
 
-        Meld::Project.binstubs(bin_shard.not_nil!)
+        Meld::Project.binstubs(bin_shard)
+      when "global"
+        # subcommand: global install ...
+        subsub = sub_args.shift?
+        if subsub != "install"
+          STDERR.puts "Unknown global command"
+          return
+        end
 
+        gi_parser = OptionParser.new do |parser|
+          parser.banner = <<-B
+          Usage:
+            meld global install <shard> [-v <version> | -b <branch> | -t <tag> | -c <commit>] [--bin NAME] [--release] [--sudo-link]
+          Notes:
+            - If --bin is omitted and the shard declares 1+ targets, all targets are built and installed.
+            - If the shard declares 0 targets, an error is raised (library-only shard).
+            - --sudo-link installs into /usr/local/bin, otherwise installs into ~/.local/bin.
+          B
+        end
+
+        gi_shard_raw : String? = nil
+        gi_version_raw : String? = nil
+        gi_branch_raw : String? = nil
+        gi_tag_raw : String? = nil
+        gi_commit_raw : String? = nil
+        gi_bin_raw : String? = nil
+        gi_release = false
+        gi_sudo = false
+
+        gi_parser.on("-v VALUE", "--ver VALUE", "Version constraint") { |v| gi_version_raw = v }
+        gi_parser.on("-b NAME", "--branch NAME", "Git branch to pin") { |v| gi_branch_raw = v }
+        gi_parser.on("-t NAME", "--tag NAME", "Git tag to pin") { |v| gi_tag_raw = v }
+        gi_parser.on("-c SHA", "--commit SHA", "Git commit to pin") { |v| gi_commit_raw = v }
+        gi_parser.on("--bin NAME", "Explicit build target name to build/install") { |v| gi_bin_raw = v }
+        gi_parser.on("--release", "Build with Crystal optimizations") { gi_release = true }
+        gi_parser.on("--sudo-link", "Install into /usr/local/bin using sudo") { gi_sudo = true }
+
+        begin
+          gi_parser.unknown_args do |rest|
+            rest.each do |tok|
+              unless tok.starts_with?("-")
+                gi_shard_raw ||= tok
+              end
+            end
+          end
+          gi_parser.parse(sub_args)
+        rescue ex
+          STDERR.puts "Error: #{ex.message}"
+          STDERR.puts
+          STDERR.puts gi_parser
+          return
+        end
+
+        # Normalize EVERY possibly-nil string ONCE
+        shard_name = (gi_shard_raw || "").to_s
+        v_commit = (gi_commit_raw || "").to_s
+        v_tag = (gi_tag_raw || "").to_s
+        v_branch = (gi_branch_raw || "").to_s
+        v_version = (gi_version_raw || "").to_s
+        bin_name_s = (gi_bin_raw || "").to_s
+
+        # Validate shard using the normalized string ONLY
+        if shard_name.strip.empty?
+          STDERR.puts "Error: shard name required"
+          STDERR.puts gi_parser
+          return
+        end
+
+        selector = Meld::Project::AddSelector.new
+        if !v_commit.empty?
+          selector.type = Meld::Project::SelectorType::Commit
+          selector.value = v_commit
+        elsif !v_tag.empty?
+          selector.type = Meld::Project::SelectorType::Tag
+          selector.value = v_tag
+        elsif !v_branch.empty?
+          selector.type = Meld::Project::SelectorType::Branch
+          selector.value = v_branch
+        elsif !v_version.empty?
+          selector.type = Meld::Project::SelectorType::Version
+          selector.value = v_version
+        else
+          selector.type = Meld::Project::SelectorType::Version
+          selector.value = ""
+        end
+
+        # Convert empty string back to nil for optional argument
+        bin_arg = bin_name_s.empty? ? nil : bin_name_s
+
+        Meld::Project.global_install(
+          shard_name,
+          selector,
+          bin_arg,
+          release: gi_release,
+          sudo_link: gi_sudo
+        )
       else
         STDERR.puts "Unknown command: #{subcommand}"
         puts
@@ -330,6 +397,8 @@ module Meld
         puts "Usage: meld exec <command>\n\nRun a command in project context."
       when "binstubs"
         puts "Usage: meld binstubs <shard>\n\nGenerate executable wrappers."
+      when "global"
+        puts "Usage: meld global install <shard> [-v|-b|-t|-c] [--bin NAME] [--release] [--sudo-link]\n\nBuild and install shard executables globally."
       else
         puts "Unknown command: #{cmd}"
       end

@@ -1,6 +1,9 @@
+# src/meld/project.cr
+
 require "yaml"
 require "http/client"
 require "json"
+require "file_utils"
 
 module Meld
   class Project
@@ -15,10 +18,21 @@ module Meld
       property type : SelectorType = SelectorType::Version
       property value : String = ""
 
-      def version? : Bool; @type == SelectorType::Version; end
-      def branch?  : Bool; @type == SelectorType::Branch;  end
-      def tag?     : Bool; @type == SelectorType::Tag;     end
-      def commit?  : Bool; @type == SelectorType::Commit;  end
+      def version? : Bool
+        @type == SelectorType::Version
+      end
+
+      def branch? : Bool
+        @type == SelectorType::Branch
+      end
+
+      def tag? : Bool
+        @type == SelectorType::Tag
+      end
+
+      def commit? : Bool
+        @type == SelectorType::Commit
+      end
 
       def empty? : Bool
         @value.empty?
@@ -35,7 +49,7 @@ module Meld
           name: my_project
           version: 0.1.0
           authors:
-          - "Your Name <[email protected]>"
+          - "Your Name <you@example.com>"
           description: "A brief description of your shard and its purpose"
           crystal: ">= 1.0.0"
           license: MIT
@@ -50,8 +64,6 @@ module Meld
       end
     end
 
-    # Accept selector for version/branch/tag/commit
-    # When Version with empty value, add only the source (github/git) without any pin.
     def self.add(shard_name : String, selector : AddSelector, dev_dependency : Bool = false)
       unless File.exists?(PROJECT_FILE)
         puts "No shard.yml found! Run 'meld init' first."
@@ -64,7 +76,6 @@ module Meld
       github_repo : String? = nil
       git_url : String? = nil
 
-      # Resolve repository
       if shard_info && shard_info.has_key?("github_repo")
         repo_value = shard_info["github_repo"]
         github_repo = repo_value.is_a?(JSON::Any) ? repo_value.as_s : repo_value.to_s
@@ -155,35 +166,178 @@ module Meld
       end
     end
 
+    # Global install: build and COPY executables from a shard.
+    # - If bin_name provided: build/copy that single target (with fallbacks).
+    # - Else: read targets from shard's shard.yml; if 1+ targets, build/copy all; if 0, error.
+    # - Destination: ~/.local/bin unless sudo_link, then /usr/local/bin.
+    # - Fall back to postinstall outputs and direct crystal build when needed.
+    def self.global_install(shard_name : String, selector : AddSelector, bin_name : String? = nil, release : Bool = true, sudo_link : Bool = false)
+      tmp_root = Dir.tempdir
+      workdir = File.join(tmp_root, "meld_global_#{Time.utc.to_unix_ns}")
+      Dir.mkdir(workdir)
+      begin
+        Dir.cd(workdir) do
+          File.write("shard.yml", <<-YAML)
+          name: meld_global
+          version: 0.0.0
+          crystal: ">= 1.0.0"
+          dependencies: {}
+          YAML
+
+          self.add(shard_name, selector, false)
+
+          puts "Resolving dependencies"
+          system("shards install")
+
+          shard_dir = File.join("lib", shard_name)
+          shard_file = File.join(shard_dir, "shard.yml")
+          unless File.exists?(shard_file)
+            STDERR.puts "Error: installed shard.yml not found at #{shard_file}"
+            return
+          end
+
+          targets = discover_targets(shard_file)
+          target_list = [] of String
+
+          if bin_name && !bin_name.empty?
+            target_list << bin_name
+          else
+            if targets.empty?
+              STDERR.puts "Error: no build target found — this shard looks like a library (no executables)"
+              return
+            else
+              target_list.concat(targets)
+            end
+          end
+
+          build_flags = [] of String
+          build_flags << "--release" if release
+
+          built_binaries = [] of {String, String} # {target, built_path}
+
+          target_list.each do |t|
+            built = File.join("bin", t)
+
+            if targets.includes?(t)
+              system((["shards", "build", t] + build_flags).join(" "))
+              if File.exists?(built)
+                built_binaries << {t, File.expand_path(built)}
+                next
+              end
+            end
+
+            fallback_candidates = [] of String
+            fallback_candidates << File.join(shard_dir, "bin", t)
+            fallback_candidates << File.join(shard_dir, "dist", t)
+            fallback_candidates << File.join(shard_dir, t)
+
+            if found = fallback_candidates.find { |p| File.exists?(p) }
+              built_binaries << {t, File.expand_path(found)}
+              next
+            end
+
+            src_candidates = [] of String
+            src_candidates << File.join(shard_dir, "src", "#{t}.cr")
+            src_candidates << File.join(shard_dir, "src", "#{shard_name}_cli.cr")
+            src_candidates << File.join(shard_dir, "src", "cli.cr")
+
+            if src = src_candidates.find { |p| File.exists?(p) }
+              FileUtils.mkdir_p("bin")
+              system((["crystal", "build", src, "-o", built] + build_flags).join(" "))
+              if File.exists?(built)
+                built_binaries << {t, File.expand_path(built)}
+                next
+              end
+            end
+
+            STDERR.puts "Warning: built binary not found for target '#{t}'; tried shards build, precompiled locations, and direct crystal build; skipping"
+          end
+
+          # Destination
+          home = ENV["HOME"]? || Path["~"].expand(home: true).to_s
+          dest_dir = sudo_link ? "/usr/local/bin" : File.join(home, ".local", "bin")
+          unless sudo_link
+            FileUtils.mkdir_p(dest_dir)
+          end
+
+          # COPY (atomic replace where possible)
+          built_binaries.each do |t, built_path|
+            dest_path = File.join(dest_dir, t)
+            tmp_dest = "#{dest_path}.tmp-#{Time.utc.to_unix_ns}"
+
+            # Copy to temp file next to final path
+            FileUtils.cp(built_path, tmp_dest)
+
+            # Ensure executable bit
+            begin
+              File.chmod(tmp_dest, 0o755)
+            rescue
+              # ignore
+            end
+
+            # Replace destination
+            if sudo_link
+              # remove then move with sudo
+              system(%(sudo rm -f "#{dest_path}"))
+              system(%(sudo mv "#{tmp_dest}" "#{dest_path}"))
+            else
+              # remove then move (no sudo)
+              File.delete?(dest_path)
+              FileUtils.mv(tmp_dest, dest_path)
+            end
+
+            puts "Installed #{t} -> #{dest_path}"
+          end
+        end
+      ensure
+        FileUtils.rm_r(workdir) if Dir.exists?(workdir)
+      end
+    end
+
+    private def self.discover_targets(shard_yml_path : String) : Array(String)
+      targets = [] of String
+      File.open(shard_yml_path) do |f|
+        any = YAML.parse(f)
+        if any.as_h?.try &.has_key?("targets")
+          tg = any["targets"]
+          if h = tg.as_h?
+            h.each_key do |k|
+              targets << k.to_s
+            end
+          end
+        end
+      end
+      targets
+    end
+
     private def self.get_common_shard_repo(shard_name)
       common_shards = {
-        "kemal" => "kemalcr/kemal",
-        "lucky" => "luckyframework/lucky",
-        "amber" => "amberframework/amber",
-        "marten" => "martenframework/marten",
-        "pg" => "will/crystal-pg",
-        "mysql" => "crystal-lang/crystal-mysql",
-        "sqlite3" => "crystal-lang/crystal-sqlite3",
-        "redis" => "stefanwille/crystal-redis",
-        "jwt" => "crystal-community/jwt",
-        "spec" => "crystal-lang/spec",
-        "ameba" => "crystal-ameba/ameba",
-        "webmock" => "manastech/webmock.cr",
-        "crest" => "mamantoha/crest",
-        "jennifer" => "imdrasil/jennifer.cr",
-        "clear" => "anykeyh/clear",
-        "granite" => "amberframework/granite",
+        "kemal"      => "kemalcr/kemal",
+        "lucky"      => "luckyframework/lucky",
+        "amber"      => "amberframework/amber",
+        "marten"     => "martenframework/marten",
+        "pg"         => "will/crystal-pg",
+        "mysql"      => "crystal-lang/crystal-mysql",
+        "sqlite3"    => "crystal-lang/crystal-sqlite3",
+        "redis"      => "stefanwille/crystal-redis",
+        "jwt"        => "crystal-community/jwt",
+        "spec"       => "crystal-lang/spec",
+        "ameba"      => "crystal-ameba/ameba",
+        "webmock"    => "manastech/webmock.cr",
+        "crest"      => "mamantoha/crest",
+        "jennifer"   => "imdrasil/jennifer.cr",
+        "clear"      => "anykeyh/clear",
+        "granite"    => "amberframework/granite",
         "tourmaline" => "protoncr/tourmaline",
-        "hardware" => "crystal-community/hardware.cr",
-        "colorize" => "crystal-lang/colorize",
-        "db" => "crystal-lang/crystal-db",
-        "minitest" => "ysbaddaden/minitest.cr",
-        "mosquito" => "mosquito-cr/mosquito",
-        "athena" => "athena-framework/athena",
-        "invidious" => "iv-org/invidious",
-        "lavinmq" => "cloudamqp/lavinmq"
+        "hardware"   => "crystal-community/hardware.cr",
+        "colorize"   => "crystal-lang/colorize",
+        "db"         => "crystal-lang/crystal-db",
+        "minitest"   => "ysbaddaden/minitest.cr",
+        "mosquito"   => "mosquito-cr/mosquito",
+        "athena"     => "athena-framework/athena",
+        "invidious"  => "iv-org/invidious",
+        "lavinmq"    => "cloudamqp/lavinmq",
       }
-
       common_shards[shard_name]? || "#{shard_name}/#{shard_name}"
     end
 
@@ -191,21 +345,18 @@ module Meld
       begin
         github_repo = get_common_shard_repo(shard_name)
         response = HTTP::Client.get("https://api.github.com/repos/#{github_repo}")
-
         if response.status_code == 200
           repo_data = JSON.parse(response.body)
           description = repo_data["description"]?
           desc_string = description ? description.as_s : "No description available"
-
           return {
             "github_repo" => github_repo,
-            "description" => desc_string
+            "description" => desc_string,
           }
         end
       rescue ex
-        # Silently fail
+        # ignore
       end
-
       nil
     end
 
@@ -321,12 +472,12 @@ module Meld
         {name: "minitest", description: "Test Unit for the Crystal programming language", repo: "ysbaddaden/minitest.cr"},
         {name: "mosquito", description: "Background task runner for crystal applications", repo: "mosquito-cr/mosquito"},
         {name: "athena", description: "An ecosystem of reusable, independent components", repo: "athena-framework/athena"},
-        {name: "hardware", description: "Get CPU, Memory and Network informations", repo: "crystal-community/hardware.cr"}
+        {name: "hardware", description: "Get CPU, Memory and Network informations", repo: "crystal-community/hardware.cr"},
       ]
 
       shards_db.select do |shard|
         shard[:name].includes?(query.downcase) ||
-        shard[:description].downcase.includes?(query.downcase)
+          shard[:description].downcase.includes?(query.downcase)
       end
     end
   end

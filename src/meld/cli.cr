@@ -1,8 +1,4 @@
 # src/meld/cli.cr
-#
-# Complete updated file with STRICT normalization of all possibly-nil strings
-# BEFORE any use. No .empty? calls occur on String | Nil unions. Every variable
-# used in checks is a plain String.
 
 require "option_parser"
 
@@ -11,7 +7,6 @@ module Meld
     VERSION = "0.1.0"
 
     def self.run(argv : Array(String))
-      # Phase 0: split argv into global flags, subcommand, and subcommand args
       global_argv = [] of String
       subcommand : String? = nil
       sub_args = [] of String
@@ -33,7 +28,6 @@ module Meld
         i += 1
       end
 
-      # Global flags (apply only before subcommand)
       show_version = false
       show_help = false
 
@@ -73,7 +67,6 @@ module Meld
         return
       end
 
-      # Only supported help form: meld help <command>
       if subcommand == "help"
         sub = sub_args.shift?
         if sub
@@ -129,7 +122,6 @@ module Meld
           add_parser.unknown_args do |rest|
             rest.each do |tok|
               if tok.starts_with?("-")
-                # flags handled by OptionParser
               else
                 unless seen_positional
                   add_shard_raw = tok
@@ -147,7 +139,6 @@ module Meld
           return
         end
 
-        # Normalize all possibly-nil strings BEFORE any checks
         add_shard = (add_shard_raw || "").to_s
         v_commit = (opt_commit_raw || "").to_s
         v_tag = (opt_tag_raw || "").to_s
@@ -280,7 +271,6 @@ module Meld
 
         Meld::Project.binstubs(bin_shard)
       when "global"
-        # subcommand: global install ...
         subsub = sub_args.shift?
         if subsub != "install"
           STDERR.puts "Unknown global command"
@@ -290,11 +280,12 @@ module Meld
         gi_parser = OptionParser.new do |parser|
           parser.banner = <<-B
           Usage:
-            meld global install <shard> [-v <version> | -b <branch> | -t <tag> | -c <commit>] [--bin NAME] [--release] [--sudo-link]
+            meld global install <shard> [-v <version> | -b <branch> | -t <tag> | -c <commit>] [--bin NAME] [--release] [--sudo-link] [--define NAME]
           Notes:
             - If --bin is omitted and the shard declares 1+ targets, all targets are built and installed.
             - If the shard declares 0 targets, an error is raised (library-only shard).
             - --sudo-link installs into /usr/local/bin, otherwise installs into ~/.local/bin.
+            - --define NAME passes -DNAME to shards/crystal (repeatable).
           B
         end
 
@@ -306,6 +297,7 @@ module Meld
         gi_bin_raw : String? = nil
         gi_release = false
         gi_sudo = false
+        gi_defines = [] of String
 
         gi_parser.on("-v VALUE", "--ver VALUE", "Version constraint") { |v| gi_version_raw = v }
         gi_parser.on("-b NAME", "--branch NAME", "Git branch to pin") { |v| gi_branch_raw = v }
@@ -314,6 +306,7 @@ module Meld
         gi_parser.on("--bin NAME", "Explicit build target name to build/install") { |v| gi_bin_raw = v }
         gi_parser.on("--release", "Build with Crystal optimizations") { gi_release = true }
         gi_parser.on("--sudo-link", "Install into /usr/local/bin using sudo") { gi_sudo = true }
+        gi_parser.on("--define NAME", "Pass -DNAME to compiler (repeatable)") { |v| gi_defines << v }
 
         begin
           gi_parser.unknown_args do |rest|
@@ -331,20 +324,19 @@ module Meld
           return
         end
 
-        # Normalize EVERY possibly-nil string ONCE
-        shard_name = (gi_shard_raw || "").to_s
+        name = (gi_shard_raw || "").to_s
+        if name.strip.empty?
+          STDERR.puts "Error: shard name required"
+          STDERR.puts gi_parser
+          return
+        end
+
         v_commit = (gi_commit_raw || "").to_s
         v_tag = (gi_tag_raw || "").to_s
         v_branch = (gi_branch_raw || "").to_s
         v_version = (gi_version_raw || "").to_s
         bin_name_s = (gi_bin_raw || "").to_s
-
-        # Validate shard using the normalized string ONLY
-        if shard_name.strip.empty?
-          STDERR.puts "Error: shard name required"
-          STDERR.puts gi_parser
-          return
-        end
+        bin_arg = bin_name_s.empty? ? nil : bin_name_s
 
         selector = Meld::Project::AddSelector.new
         if !v_commit.empty?
@@ -364,15 +356,13 @@ module Meld
           selector.value = ""
         end
 
-        # Convert empty string back to nil for optional argument
-        bin_arg = bin_name_s.empty? ? nil : bin_name_s
-
         Meld::Project.global_install(
-          shard_name,
+          name,
           selector,
           bin_arg,
           release: gi_release,
-          sudo_link: gi_sudo
+          sudo_link: gi_sudo,
+          defines: gi_defines
         )
       else
         STDERR.puts "Unknown command: #{subcommand}"
@@ -398,7 +388,7 @@ module Meld
       when "binstubs"
         puts "Usage: meld binstubs <shard>\n\nGenerate executable wrappers."
       when "global"
-        puts "Usage: meld global install <shard> [-v|-b|-t|-c] [--bin NAME] [--release] [--sudo-link]\n\nBuild and install shard executables globally."
+        puts "Usage: meld global install <shard> [-v|-b|-t|-c] [--bin NAME] [--release] [--sudo-link] [--define NAME]\n\nBuild and install shard executables globally."
       else
         puts "Unknown command: #{cmd}"
       end

@@ -166,12 +166,7 @@ module Meld
       end
     end
 
-    # Global install: build and COPY executables from a shard.
-    # - If bin_name provided: build/copy that single target (with fallbacks).
-    # - Else: read targets from shard's shard.yml; if 1+ targets, build/copy all; if 0, error.
-    # - Destination: ~/.local/bin unless sudo_link, then /usr/local/bin.
-    # - Fall back to postinstall outputs and direct crystal build when needed.
-    def self.global_install(shard_name : String, selector : AddSelector, bin_name : String? = nil, release : Bool = true, sudo_link : Bool = false)
+    def self.global_install(shard_name : String, selector : AddSelector, bin_name : String? = nil, release : Bool = true, sudo_link : Bool = false, defines : Array(String) = [] of String)
       tmp_root = Dir.tempdir
       workdir = File.join(tmp_root, "meld_global_#{Time.utc.to_unix_ns}")
       Dir.mkdir(workdir)
@@ -187,12 +182,20 @@ module Meld
           self.add(shard_name, selector, false)
 
           puts "Resolving dependencies"
-          system("shards install")
-
+          ok = system("shards install")
           shard_dir = File.join("lib", shard_name)
           shard_file = File.join(shard_dir, "shard.yml")
-          unless File.exists?(shard_file)
-            STDERR.puts "Error: installed shard.yml not found at #{shard_file}"
+
+          if !ok || !Dir.exists?(shard_dir) || !File.exists?(shard_file)
+            puts "Primary install path failed or incomplete; attempting direct source build for #{shard_name}..."
+            clone_and_build_from_source(
+              shard_name,
+              selector,
+              bin_name,
+              release,
+              sudo_link,
+              defines
+            )
             return
           end
 
@@ -212,8 +215,16 @@ module Meld
 
           build_flags = [] of String
           build_flags << "--release" if release
+          defines.each { |d| build_flags << "-D#{d}" }
 
-          built_binaries = [] of {String, String} # {target, built_path}
+          # Optional auto-infer for ExecutionContext usage
+          if uses_execution_context?(shard_dir)
+            %w(preview_mt execution_context).each do |d|
+              build_flags << "-D#{d}" unless build_flags.includes?("-D#{d}")
+            end
+          end
+
+          built_binaries = [] of {String, String}
 
           target_list.each do |t|
             built = File.join("bin", t)
@@ -253,44 +264,143 @@ module Meld
             STDERR.puts "Warning: built binary not found for target '#{t}'; tried shards build, precompiled locations, and direct crystal build; skipping"
           end
 
-          # Destination
-          home = ENV["HOME"]? || Path["~"].expand(home: true).to_s
-          dest_dir = sudo_link ? "/usr/local/bin" : File.join(home, ".local", "bin")
-          unless sudo_link
-            FileUtils.mkdir_p(dest_dir)
-          end
-
-          # COPY (atomic replace where possible)
-          built_binaries.each do |t, built_path|
-            dest_path = File.join(dest_dir, t)
-            tmp_dest = "#{dest_path}.tmp-#{Time.utc.to_unix_ns}"
-
-            # Copy to temp file next to final path
-            FileUtils.cp(built_path, tmp_dest)
-
-            # Ensure executable bit
-            begin
-              File.chmod(tmp_dest, 0o755)
-            rescue
-              # ignore
-            end
-
-            # Replace destination
-            if sudo_link
-              # remove then move with sudo
-              system(%(sudo rm -f "#{dest_path}"))
-              system(%(sudo mv "#{tmp_dest}" "#{dest_path}"))
-            else
-              # remove then move (no sudo)
-              File.delete?(dest_path)
-              FileUtils.mv(tmp_dest, dest_path)
-            end
-
-            puts "Installed #{t} -> #{dest_path}"
-          end
+          copy_binaries_to_dest(built_binaries, sudo_link)
         end
       ensure
         FileUtils.rm_r(workdir) if Dir.exists?(workdir)
+      end
+    end
+
+    private def self.clone_and_build_from_source(shard_name : String, selector : AddSelector, bin_name : String?, release : Bool, sudo_link : Bool, defines : Array(String))
+      repo = get_common_shard_repo(shard_name)
+      work = Dir.current
+      clone_dir = File.join(work, "src_clone_#{shard_name}_#{Time.utc.to_unix_ns}")
+      begin
+        system(%(git clone "https://github.com/#{repo}.git" "#{clone_dir}"))
+        Dir.cd(clone_dir) do
+          if selector.commit? && !selector.empty?
+            system(%(git checkout "#{selector.value}"))
+          elsif selector.tag? && !selector.empty?
+            system(%(git checkout "tags/#{selector.value}"))
+          elsif selector.branch? && !selector.empty?
+            system(%(git checkout "#{selector.value}"))
+          end
+
+          shard_file = File.join(clone_dir, "shard.yml")
+          targets = File.exists?(shard_file) ? discover_targets(shard_file) : [] of String
+
+          target_list = [] of String
+          if bin_name && !bin_name.empty?
+            target_list << bin_name
+          else
+            if targets.empty?
+              STDERR.puts "Error: no build target found — source indicates a library (no executables)"
+              return
+            else
+              target_list.concat(targets)
+            end
+          end
+
+          build_flags = [] of String
+          build_flags << "--release" if release
+          defines.each { |d| build_flags << "-D#{d}" }
+
+          if uses_execution_context?(clone_dir)
+            %w(preview_mt execution_context).each do |d|
+              build_flags << "-D#{d}" unless build_flags.includes?("-D#{d}")
+            end
+          end
+
+          built_binaries = [] of {String, String}
+
+          target_list.each do |t|
+            built = File.join(clone_dir, "bin", t)
+
+            if targets.includes?(t)
+              if File.exists?("shard.yml")
+                system("shards install")
+              end
+              system((["shards", "build", t] + build_flags).join(" "))
+              if File.exists?(built)
+                built_binaries << {t, File.expand_path(built)}
+                next
+              end
+            end
+
+            fallback_candidates = [] of String
+            fallback_candidates << File.join(clone_dir, "bin", t)
+            fallback_candidates << File.join(clone_dir, "dist", t)
+            fallback_candidates << File.join(clone_dir, t)
+
+            if found = fallback_candidates.find { |p| File.exists?(p) }
+              built_binaries << {t, File.expand_path(found)}
+              next
+            end
+
+            src_candidates = [] of String
+            src_candidates << File.join(clone_dir, "src", "#{t}.cr")
+            src_candidates << File.join(clone_dir, "src", "#{shard_name}_cli.cr")
+            src_candidates << File.join(clone_dir, "src", "cli.cr")
+
+            if src = src_candidates.find { |p| File.exists?(p) }
+              FileUtils.mkdir_p(File.join(clone_dir, "bin"))
+              system((["crystal", "build", src, "-o", built] + build_flags).join(" "))
+              if File.exists?(built)
+                built_binaries << {t, File.expand_path(built)}
+                next
+              end
+            end
+
+            STDERR.puts "Warning: unable to build or locate binary for '#{t}' from source"
+          end
+
+          copy_binaries_to_dest(built_binaries, sudo_link)
+        end
+      ensure
+        FileUtils.rm_r(clone_dir) if Dir.exists?(clone_dir)
+      end
+    end
+
+    private def self.copy_binaries_to_dest(built_binaries : Array(Tuple(String, String)), sudo_link : Bool)
+      return if built_binaries.empty?
+
+      home = ENV["HOME"]? || Path["~"].expand(home: true).to_s
+      dest_dir = sudo_link ? "/usr/local/bin" : File.join(home, ".local", "bin")
+      unless sudo_link
+        FileUtils.mkdir_p(dest_dir)
+      end
+
+      built_binaries.each do |t, built_path|
+        dest_path = File.join(dest_dir, t)
+        tmp_dest = "#{dest_path}.tmp-#{Time.utc.to_unix_ns}"
+
+        FileUtils.cp(built_path, tmp_dest)
+
+        begin
+          File.chmod(tmp_dest, 0o755)
+        rescue
+        end
+
+        if sudo_link
+          system(%(sudo rm -f "#{dest_path}"))
+          system(%(sudo mv "#{tmp_dest}" "#{dest_path}"))
+        else
+          File.delete?(dest_path)
+          FileUtils.mv(tmp_dest, dest_path)
+        end
+
+        puts "Installed #{t} -> #{dest_path}"
+      end
+    end
+
+    private def self.uses_execution_context?(root : String) : Bool
+      pattern = File.join(root, "src", "**", "*.cr")
+      Dir.glob(pattern).any? do |p|
+        begin
+          File.read(p).includes?("Fiber::ExecutionContext")
+        rescue
+          false
+        end
       end
     end
 
@@ -354,8 +464,7 @@ module Meld
             "description" => desc_string,
           }
         end
-      rescue ex
-        # ignore
+      rescue
       end
       nil
     end
@@ -410,7 +519,7 @@ module Meld
           "crystal: \"#{crystal_version}\""
         elsif stripped.starts_with?("license:") && license
           "license: #{license}"
-        elsif stripped.starts_with?("- \"") && author && !author_line_updated
+        elsif stripped.starts_with?(" - \"") && author && !author_line_updated
           author_line_updated = true
           "- \"#{author}\""
         else

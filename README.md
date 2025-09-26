@@ -293,8 +293,8 @@ This project is licensed under the AGPL-3 License. See LICENSE file for details.
 ## Roadmap
 
 - [ ] Meld install script
-- [ ] Global package install e.g. ```meld install -g morten```
-- [ ] Remove packages (prunes from ```lib``` folder too) e.g. ```meld remove kemal```
+- [x] Global package install e.g. ```meld install -g morten```
+- [x] Remove packages (prunes from ```lib``` folder too) e.g. ```meld remove kemal```
 - [ ] Meld self updater e.g. ```meld self update```
 - [ ] Advanced search filters
 - [ ] Configuration file support

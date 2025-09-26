@@ -166,6 +166,136 @@ module Meld
       end
     end
 
+    # remove a shard from shard.yml and delete lib/<shard> directory
+    def self.remove(shard_name : String)
+      unless File.exists?(PROJECT_FILE)
+        STDERR.puts "No shard.yml found! Run 'meld init' first."
+        return
+      end
+
+      content = File.read(PROJECT_FILE)
+      # Remove from both dependencies and development_dependencies if present
+      updated = remove_from_section(content, "dependencies", shard_name)
+      updated = remove_from_section(updated, "development_dependencies", shard_name)
+
+      if updated == content
+        puts "No entry for '#{shard_name}' found in shard.yml"
+      else
+        File.write(PROJECT_FILE, updated)
+        puts "Removed '#{shard_name}' from shard.yml"
+      end
+
+      # Update lockfile and dependency tree
+      system("shards update")
+
+      # Remove vendored directory under lib/ if it exists
+      lib_dir = ENV["SHARDS_INSTALL_PATH"]? || "lib"
+      target_path = File.join(lib_dir, shard_name)
+      if Dir.exists?(target_path)
+        begin
+          FileUtils.rm_r(target_path)
+          puts "Deleted #{target_path}"
+        rescue ex
+          STDERR.puts "Warning: failed to delete #{target_path}: #{ex.message}"
+        end
+      else
+        puts "No vendored directory at #{target_path}"
+      end
+
+      # Prune unused libs to keep lib/ tidy (optional but helpful)
+      system("shards prune")
+    end
+
+    private def self.remove_from_section(content : String, section : String, shard_name : String) : String
+      lines = content.lines(chomp: false)
+      out = [] of String
+
+      in_section = false
+      current_key = ""
+      skip_block = false
+      indent_section = ""
+      indent_entry = ""
+
+      i = 0
+      while i < lines.size
+        line = lines[i]
+        stripped = line.rstrip
+        lstrip = line.lstrip
+
+        # Detect start of section
+        if !in_section && stripped.strip == "#{section}:"
+          in_section = true
+          indent_section = line[0, line.size - lstrip.size] || ""
+          out << line
+          i += 1
+          next
+        end
+
+        if in_section
+          # If the next non-empty, non-comment line is dedented to section level or less, section ends
+          if stripped.strip.empty?
+            out << line
+            i += 1
+            next
+          end
+
+          current_indent = line[0, line.size - lstrip.size] || ""
+
+          # Section ends when dedent to less or equal than section indent and not a comment/blank
+          if current_indent.size <= indent_section.size && !stripped.strip.empty?
+            in_section = false
+            # fall through to normal processing (don't skip this line)
+          else
+            # Inside section: look for top-level entry "  shard_name:"
+            # Determine if this line starts a dependency key
+            if !skip_block
+              # Key line pattern: indentation + "<name>:" (no further indent)
+              # Compute the key if this line looks like "<indent>name:"
+              if m = lstrip.match(/^([A-Za-z0-9_\-]+):\s*$/)
+                current_key = m[1]
+                indent_entry = current_indent
+                if current_key == shard_name
+                  # Skip this block: consume lines until next key at same indent or section end
+                  skip_block = true
+                  i += 1
+                  # Consume indented block
+                  while i < lines.size
+                    nxt = lines[i]
+                    n_lstrip = nxt.lstrip
+                    n_indent = nxt[0, nxt.size - n_lstrip.size] || ""
+                    n_stripped = nxt.rstrip
+                    break if n_indent.size <= indent_entry.size && !n_stripped.strip.empty?
+                    i += 1
+                  end
+                  # Do not append the skipped block
+                  next
+                else
+                  out << line
+                  i += 1
+                  next
+                end
+              else
+                # Continuation or comment inside section
+                out << line
+                i += 1
+                next
+              end
+            else
+              # Should not reach here because skip_block consumes its block
+              i += 1
+              next
+            end
+          end
+        end
+
+        # Default: outside section, just copy
+        out << line
+        i += 1
+      end
+
+      out.join
+    end
+
     def self.global_install(shard_name : String, selector : AddSelector, bin_name : String? = nil, release : Bool = true, sudo_link : Bool = false, defines : Array(String) = [] of String)
       tmp_root = Dir.tempdir
       workdir = File.join(tmp_root, "meld_global_#{Time.utc.to_unix_ns}")

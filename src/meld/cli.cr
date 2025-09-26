@@ -41,6 +41,7 @@ module Meld
         Commands:
           init                               Initialize project (shard.yml)
           add <shard> [-v|-b|-t|-c] [--dev]  Add a shard (pin with version/branch/tag/commit)
+          remove <shard>                     Remove a shard from shard.yml and lib/
           search <query>                     Search for available shards
           install                            Install dependencies
           update [shard]                     Update all or a specific shard
@@ -171,6 +172,30 @@ module Meld
         end
 
         Meld::Project.add(add_shard, selector, add_dev)
+      when "remove"
+        rm_parser = OptionParser.new do |parser|
+          parser.banner = "Usage:\n  meld remove <shard>\n"
+        end
+
+        rm_shard_raw : String? = nil
+        begin
+          rm_parser.unknown_args { |rest| rm_shard_raw = rest.shift? }
+          rm_parser.parse(sub_args)
+        rescue ex
+          STDERR.puts "Error: #{ex.message}"
+          STDERR.puts
+          STDERR.puts rm_parser
+          return
+        end
+
+        rm_shard = (rm_shard_raw || "").to_s
+        if rm_shard.strip.empty?
+          STDERR.puts "Error: shard name required"
+          STDERR.puts rm_parser
+          return
+        end
+
+        Meld::Project.remove(rm_shard)
       when "search"
         search_parser = OptionParser.new do |parser|
           parser.banner = "Usage:\n  meld search <query>\n"
@@ -377,6 +402,8 @@ module Meld
         puts "Usage: meld init\n\nInitialize project (shard.yml)."
       when "add"
         puts "Usage: meld add <shard> [-v <version> | -b <branch> | -t <tag> | -c <commit>] [--dev]\n\nAdd a shard to project. Use --dev for development dependency."
+      when "remove"
+        puts "Usage: meld remove <shard>\n\nRemove shard from shard.yml and delete lib/<shard> directory."
       when "search"
         puts "Usage: meld search <query>\n\nSearch for available shards."
       when "install"
